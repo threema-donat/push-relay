@@ -22,7 +22,7 @@ use http::{
     header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE},
     Request, Response,
 };
-use hyper::{body, Body, StatusCode, Uri};
+use hyper::{body::HttpBody, Body, StatusCode, Uri};
 use serde_derive::{Deserialize, Serialize};
 use serde_json as json;
 use tokio::sync::Mutex;
@@ -270,9 +270,13 @@ impl HmsContext {
         let status = response.status();
 
         // Fetch body
-        let body_bytes = body::to_bytes(response.into_body()).await.map_err(|e| {
-            SendPushError::AuthError(format!("Could not read HMS auth response body: {}", e))
-        })?;
+        let body_bytes = response
+            .collect()
+            .await
+            .map_err(|e| {
+                SendPushError::AuthError(format!("Could not read HMS auth response body: {}", e))
+            })?
+            .to_bytes();
 
         // Validate status code
         if status != StatusCode::OK {
@@ -417,9 +421,13 @@ pub async fn send_push(
     let status = response.status();
 
     // Fetch body
-    let body_bytes = body::to_bytes(response.into_body()).await.map_err(|e| {
-        SendPushError::AuthError(format!("Could not read HMS auth response body: {}", e))
-    })?;
+    let body_bytes = response
+        .collect()
+        .await
+        .map_err(|e| {
+            SendPushError::AuthError(format!("Could not read HMS auth response body: {}", e))
+        })?
+        .to_bytes();
 
     // Decode UTF8 bytes
     let body = match from_utf8(&body_bytes) {

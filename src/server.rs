@@ -15,7 +15,7 @@ use data_encoding::HEXLOWER_PERMISSIVE;
 use futures::future::{BoxFuture, FutureExt};
 use http::status::StatusCode;
 use hyper::{
-    body::{self, Body, Bytes},
+    body::{Body, Bytes, HttpBody},
     header::CONTENT_TYPE,
     server::{conn::AddrStream, Server},
     service::{make_service_fn, Service},
@@ -249,7 +249,7 @@ async fn handle_push_request(
     }
 
     // Parse request body
-    let body: Bytes = match body::to_bytes(req.into_body()).await {
+    let body: Bytes = match req.collect().await.map(|collected| collected.to_bytes()) {
         Ok(bytes) => bytes,
         Err(e) => {
             error!("Could not convert body to bytes: {}", e);
@@ -591,7 +591,7 @@ mod tests {
     use super::*;
 
     async fn get_body(body: Body) -> String {
-        let bytes = body::to_bytes(body).await.unwrap();
+        let bytes = body.collect().await.unwrap().to_bytes();
         ::std::str::from_utf8(&bytes).unwrap().to_string()
     }
 

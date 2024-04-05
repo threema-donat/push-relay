@@ -3,7 +3,8 @@ use std::str::from_utf8;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use http::header::{AUTHORIZATION, CONTENT_TYPE};
 use http::Request;
-use hyper::{body, Body, StatusCode, Uri};
+use hyper::body::HttpBody;
+use hyper::{Body, StatusCode, Uri};
 
 use crate::errors::InfluxdbError;
 use crate::http_client::{make_client, HttpClient};
@@ -82,9 +83,11 @@ impl Influxdb {
         match response.status() {
             StatusCode::OK => Ok(()),
             StatusCode::BAD_REQUEST => {
-                let body: String = body::to_bytes(response.into_body())
+                let body = response
+                    .collect()
                     .await
                     .ok()
+                    .map(|a| a.to_bytes())
                     .and_then(|body| from_utf8(&body).ok().map(|s| s.to_string()))
                     .unwrap_or_else(|| "[invalid utf8 body]".to_string());
                 Err(InfluxdbError::Other(body))

@@ -4,7 +4,8 @@ use std::str::{from_utf8, FromStr};
 
 use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use http::Request;
-use hyper::{body, Body, StatusCode, Uri};
+use hyper::body::HttpBody;
+use hyper::{Body, StatusCode, Uri};
 use serde_derive::{Deserialize, Serialize};
 use serde_json as json;
 
@@ -107,9 +108,11 @@ pub async fn send_push(
 
     // Read fully body
     let status = response.status();
-    let body = body::to_bytes(response.into_body())
+    let body = response
+        .collect()
         .await
-        .map_err(|e| SendPushError::Other(format!("Could not read FCM response body: {}", e)))?;
+        .map_err(|e| SendPushError::Other(format!("Could not read FCM response body: {}", e)))?
+        .to_bytes();
 
     // Check status code
     match status {
