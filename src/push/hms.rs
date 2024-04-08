@@ -22,7 +22,8 @@ use http::{
     header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE},
     Request, Response,
 };
-use hyper::{body::HttpBody, Body, StatusCode, Uri};
+use http_body_util::{BodyExt, Full};
+use hyper::{body::Incoming, StatusCode, Uri};
 use serde_derive::{Deserialize, Serialize};
 use serde_json as json;
 use tokio::sync::Mutex;
@@ -258,9 +259,9 @@ impl HmsContext {
         let request = Request::post(Uri::from_str(&hms_login_url()).unwrap())
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(CONTENT_LENGTH, &*body.len().to_string())
-            .body(Body::from(body))
+            .body(Full::new(body.into()).boxed())
             .unwrap();
-        let response: Response<Body> = self
+        let response: Response<Incoming> = self
             .client
             .request(request)
             .await
@@ -407,11 +408,11 @@ pub async fn send_push(
             AUTHORIZATION,
             &format!("Bearer {}", credentials.access_token),
         )
-        .body(Body::from(payload_string))
+        .body(Full::new(payload_string.into()).boxed())
         .unwrap();
 
     // Send request
-    let response: Response<Body> = context
+    let response: Response<Incoming> = context
         .client
         .request(request)
         .await
@@ -522,7 +523,7 @@ mod tests {
             const CLIENT_SECRET: &str = "sehr-sekur";
 
             // Set up context
-            let client = http_client::make_client(10);
+            let client = http_client::make_client(10).expect("Could not create client");
             let context = HmsContext::new(
                 client,
                 HmsConfig {

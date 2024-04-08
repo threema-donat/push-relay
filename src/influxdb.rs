@@ -3,8 +3,9 @@ use std::str::from_utf8;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use http::header::{AUTHORIZATION, CONTENT_TYPE};
 use http::Request;
-use hyper::body::HttpBody;
-use hyper::{Body, StatusCode, Uri};
+use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
+use hyper::{StatusCode, Uri};
 
 use crate::errors::InfluxdbError;
 use crate::http_client::{make_client, HttpClient};
@@ -30,7 +31,7 @@ impl Influxdb {
         db: String,
     ) -> Result<Self, String> {
         // Initialize HTTP client
-        let client = make_client(90);
+        let client = make_client(90).map_err(|e| format!("Could not create http client: {e}"))?;
 
         // Determine hostname
         let hostname = hostname::get().ok().map_or_else(
@@ -65,13 +66,13 @@ impl Influxdb {
             .unwrap();
 
         // Prepare body
-        let body: Body = format!("q=CREATE%20DATABASE%20{}", self.db).into();
+        let body = Full::new(format!("q=CREATE%20DATABASE%20{}", self.db).into());
 
         // Send request
         let request = Request::post(uri)
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(AUTHORIZATION, &*self.authorization)
-            .body(body)
+            .body(body.boxed())
             .unwrap();
         let response = self
             .client
@@ -87,7 +88,7 @@ impl Influxdb {
                     .collect()
                     .await
                     .ok()
-                    .map(|a| a.to_bytes())
+                    .map(|collected| collected.to_bytes())
                     .and_then(|body| from_utf8(&body).ok().map(|s| s.to_string()))
                     .unwrap_or_else(|| "[invalid utf8 body]".to_string());
                 Err(InfluxdbError::Other(body))
@@ -99,7 +100,10 @@ impl Influxdb {
         }
     }
 
-    async fn log(&self, body: Body) -> InfluxdbResult {
+    async fn log<B>(&self, body: B) -> InfluxdbResult
+    where
+        B: Into<Bytes>,
+    {
         // format URL
         let uri: Uri = format!("{}/write?db={}", &self.connection_string, &self.db)
             .parse()
@@ -108,7 +112,7 @@ impl Influxdb {
         // Send request
         let request = Request::post(uri)
             .header(AUTHORIZATION, &*self.authorization)
-            .body(body)
+            .body(Full::new(body.into()).boxed())
             .unwrap();
         let response = self
             .client
@@ -130,7 +134,7 @@ impl Influxdb {
     /// Log the starting of the push relay server.
     pub async fn log_started(&self) -> InfluxdbResult {
         debug!("Logging \"started\" event to InfluxDB");
-        self.log(format!("started,host={} value=1", self.hostname).into())
+        self.log(format!("started,host={} value=1", self.hostname))
             .await
     }
 
@@ -143,16 +147,13 @@ impl Influxdb {
             version,
         );
         let success_str = if success { "true" } else { "false" };
-        self.log(
-            format!(
-                "push,host={},type={},version={},success={} value=1",
-                self.hostname,
-                push_type.to_ascii_lowercase(),
-                version,
-                success_str,
-            )
-            .into(),
-        )
+        self.log(format!(
+            "push,host={},type={},version={},success={} value=1",
+            self.hostname,
+            push_type.to_ascii_lowercase(),
+            version,
+            success_str,
+        ))
         .await
     }
 }

@@ -8,10 +8,13 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum PushRelayError {
     #[error("APNs error: {0}")]
-    ApnsError(#[from] A2Error),
+    Apns(#[from] A2Error),
 
     #[error("Hyper error: {0}")]
-    HyperError(#[from] HyperError),
+    Hyper(#[from] HyperError),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Error, Debug)]

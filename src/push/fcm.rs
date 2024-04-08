@@ -4,8 +4,8 @@ use std::str::{from_utf8, FromStr};
 
 use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use http::Request;
-use hyper::body::HttpBody;
-use hyper::{Body, StatusCode, Uri};
+use http_body_util::{BodyExt, Full};
+use hyper::{StatusCode, Uri};
 use serde_derive::{Deserialize, Serialize};
 use serde_json as json;
 
@@ -100,7 +100,7 @@ pub async fn send_push(
                 .header(AUTHORIZATION, &*format!("key={}", api_key))
                 .header(CONTENT_TYPE, "application/json")
                 .header(CONTENT_LENGTH, &*payload_string.len().to_string())
-                .body(Body::from(payload_string))
+                .body(Full::new(payload_string.into()).boxed())
                 .unwrap(),
         )
         .await

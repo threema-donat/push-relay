@@ -1,12 +1,7 @@
+use std::convert::Infallible;
 use std::{
-    borrow::Cow,
-    collections::HashMap,
-    convert::Into,
-    future::Future,
-    net::SocketAddr,
-    pin::Pin,
+    borrow::Cow, collections::HashMap, convert::Into, future::Future, net::SocketAddr, pin::Pin,
     sync::Arc,
-    task::{Context, Poll},
 };
 
 use a2::client::{Client as ApnsClient, Endpoint};
@@ -14,14 +9,15 @@ use a2::CollapseId;
 use data_encoding::HEXLOWER_PERMISSIVE;
 use futures::future::{BoxFuture, FutureExt};
 use http::status::StatusCode;
+use http::Request;
+use http_body_util::{combinators::BoxBody, BodyExt};
+use http_body_util::{Empty, Full};
+use hyper::body::Incoming;
 use hyper::{
-    body::{Body, Bytes, HttpBody},
-    header::CONTENT_TYPE,
-    server::{conn::AddrStream, Server},
-    service::{make_service_fn, Service},
-    Method, Request, Response,
+    body::Bytes, header::CONTENT_TYPE, server::conn::http1, service::Service, Method, Response,
 };
-use tokio::sync::Mutex;
+use hyper_util::rt::TokioIo;
+use tokio::{net::TcpListener, sync::Mutex};
 
 use crate::{
     config::{Config, ThreemaGatewayConfig},
@@ -59,7 +55,7 @@ pub async fn serve(
     let hms = hms.unwrap_or_default();
 
     // Create FCM HTTP client
-    let fcm_client = http_client::make_client(90);
+    let fcm_client = http_client::make_client(90)?;
 
     // Create APNs clients
     let apns_client_prod = Arc::new(Mutex::new(apns::create_client(
@@ -76,7 +72,7 @@ pub async fn serve(
     )?));
 
     // Create a shared HMS HTTP client
-    let hms_client = http_client::make_client(90);
+    let hms_client = http_client::make_client(90)?;
 
     // Create a HMS context for every config entry
     let hms_contexts = Arc::new(
@@ -91,7 +87,7 @@ pub async fn serve(
     );
 
     // Create Threema Gateway HTTP client
-    let threema_gateway_client = http_client::make_client(90);
+    let threema_gateway_client = http_client::make_client(90)?;
 
     // Create InfluxDB client
     let influxdb = influxdb.map(|c| {
@@ -126,8 +122,15 @@ pub async fn serve(
         debug!("Not using InfluxDB logging");
     };
 
-    // Create server
-    let make_svc = make_service_fn(|_conn: &AddrStream| {
+    let listener = TcpListener::bind(listen_on)
+        .await
+        .expect("Could not bind to address");
+
+    // Run until completion
+    loop {
+        let (tcp_stream, _socket_addr) = listener.accept().await?;
+        let tcp_stream = TokioIo::new(tcp_stream);
+
         let service = PushHandler {
             fcm_client: fcm_client.clone(),
             fcm_api_key: fcm.api_key.clone(),
@@ -139,13 +142,61 @@ pub async fn serve(
             threema_gateway_config: threema_gateway.clone(),
             influxdb: influxdb.clone(),
         };
-        async move { Ok::<_, ServiceError>(service) }
-    });
-    let server = Server::bind(&listen_on).serve(make_svc);
 
-    // Run until completion
-    server.await?;
-    Ok(())
+        tokio::task::spawn(async move {
+            if let Err(err) = http1::Builder::new()
+                .serve_connection(tcp_stream, service)
+                .await
+            {
+                error!("Failed to serve: {err}");
+            }
+        });
+    }
+}
+
+mod responses {
+    use super::*;
+
+    type BoxedByteResponse = Response<BoxBody<Bytes, Infallible>>;
+
+    /// Return a generic "400 bad request" response.
+    pub fn bad_request<B>(body: B) -> BoxedByteResponse
+    where
+        B: Into<Bytes>,
+    {
+        Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .header(CONTENT_TYPE, "text/plain")
+            .body(Full::new(body.into()).boxed())
+            .unwrap()
+    }
+
+    /// Return a generic "404 not found" response.
+    pub fn not_found() -> BoxedByteResponse {
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(CONTENT_TYPE, "text/plain")
+            .body(Full::new("Not found".into()).boxed())
+            .unwrap()
+    }
+
+    /// Return a generic "405 method not allowed" response.
+    pub fn method_not_allowed() -> BoxedByteResponse {
+        Response::builder()
+            .status(StatusCode::METHOD_NOT_ALLOWED)
+            .header(CONTENT_TYPE, "text/plain")
+            .body(Full::new("Method not allowed".into()).boxed())
+            .unwrap()
+    }
+
+    /// Return a generic "500 internal server error" response.
+    pub fn internal_server_error() -> BoxedByteResponse {
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header(CONTENT_TYPE, "text/plain")
+            .body(Full::new("Internal server error".into()).boxed())
+            .unwrap()
+    }
 }
 
 /// The server endpoint that accepts incoming push requests.
@@ -161,51 +212,11 @@ pub struct PushHandler {
     influxdb: Option<Arc<Influxdb>>,
 }
 
-mod responses {
-    use super::*;
-
-    /// Return a generic "400 bad request" response.
-    pub fn bad_request(body: impl Into<Body>) -> Response<Body> {
-        Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .header(CONTENT_TYPE, "text/plain")
-            .body(body.into())
-            .unwrap()
-    }
-
-    /// Return a generic "404 not found" response.
-    pub fn not_found() -> Response<Body> {
-        Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .header(CONTENT_TYPE, "text/plain")
-            .body(Body::from("Not found"))
-            .unwrap()
-    }
-
-    /// Return a generic "405 method not allowed" response.
-    pub fn method_not_allowed() -> Response<Body> {
-        Response::builder()
-            .status(StatusCode::METHOD_NOT_ALLOWED)
-            .header(CONTENT_TYPE, "text/plain")
-            .body(Body::from("Method not allowed"))
-            .unwrap()
-    }
-
-    /// Return a generic "500 internal server error" response.
-    pub fn internal_server_error() -> Response<Body> {
-        Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .header(CONTENT_TYPE, "text/plain")
-            .body(Body::from("Internal server error"))
-            .unwrap()
-    }
-}
-
 /// Main push handling entry point.
 ///
 /// Handle a request, return a response.
 async fn handle_push_request(
-    req: Request<Body>,
+    req: Request<BoxBody<Bytes, hyper::Error>>,
     fcm_client: HttpClient,
     fcm_api_key: String,
     apns_client_prod: Arc<Mutex<ApnsClient>>,
@@ -215,7 +226,7 @@ async fn handle_push_request(
     threema_gateway_config: Option<ThreemaGatewayConfig>,
     threema_gateway_private_key: Option<ThreemaGatewayPrivateKey>,
     influxdb: Option<Arc<Influxdb>>,
-) -> Result<Response<Body>, ServiceError> {
+) -> Result<Response<BoxBody<Bytes, Infallible>>, ServiceError> {
     debug!("{} {}", req.method(), req.uri());
 
     // Verify path
@@ -505,7 +516,7 @@ async fn handle_push_request(
             Ok(Response::builder()
                 .status(StatusCode::NO_CONTENT)
                 .header(CONTENT_TYPE, "text/plain")
-                .body(Body::empty())
+                .body(Empty::new().boxed())
                 .unwrap())
         }
         Err(e) => {
@@ -519,25 +530,22 @@ async fn handle_push_request(
                     SendPushError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
                 })
                 .header(CONTENT_TYPE, "text/plain")
-                .body(Body::from("Push not successful"))
+                .body(Full::new("Push not successful".into()).boxed())
                 .unwrap())
         }
     }
 }
 
-impl Service<Request<Body>> for PushHandler {
-    type Response = Response<Body>;
+impl Service<Request<Incoming>> for PushHandler {
+    type Response = Response<BoxBody<Bytes, Infallible>>;
     type Error = ServiceError;
     #[allow(clippy::type_complexity)]
     type Future =
         Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
     /// Main service entry point.
-    fn call(&mut self, req: Request<Body>) -> Self::Future {
+    fn call(&self, req: Request<Incoming>) -> Self::Future {
+        let req = req.map(BodyExt::boxed);
         // Delegate to async fn
         let fcm_client = self.fcm_client.clone();
         let fcm_api_key = self.fcm_api_key.clone();
@@ -581,7 +589,8 @@ impl Service<Request<Body>> for PushHandler {
 
 #[cfg(test)]
 mod tests {
-    use hyper::Body;
+    use http::Request;
+    use http_body_util::{BodyExt, Empty};
     use mockito::{mock, Matcher};
     use openssl::{
         ec::{EcGroup, EcKey},
@@ -590,8 +599,11 @@ mod tests {
 
     use super::*;
 
-    async fn get_body(body: Body) -> String {
-        let bytes = body.collect().await.unwrap().to_bytes();
+    async fn get_body<B>(body: B) -> String
+    where
+        B: hyper::body::Body,
+    {
+        let bytes = body.collect().await.ok().unwrap().to_bytes();
         ::std::str::from_utf8(&bytes).unwrap().to_string()
     }
 
@@ -603,7 +615,7 @@ mod tests {
     }
 
     fn get_handler() -> PushHandler {
-        let fcm_client = http_client::make_client(10);
+        let fcm_client = http_client::make_client(10).expect("fcm_client");
         let api_key = get_apns_test_key();
         let apns_client_prod = apns::create_client(
             Endpoint::Production,
@@ -615,7 +627,7 @@ mod tests {
         let apns_client_sbox =
             apns::create_client(Endpoint::Sandbox, api_key.as_slice(), "team_id", "key_id")
                 .unwrap();
-        let threema_gateway_client = http_client::make_client(10);
+        let threema_gateway_client = http_client::make_client(10).expect("threema_gateway_client");
         PushHandler {
             fcm_client,
             fcm_api_key: "aassddff".into(),
@@ -634,7 +646,7 @@ mod tests {
     async fn test_invalid_path() {
         let mut handler = get_handler();
 
-        let req = Request::post("/larifari").body(Body::empty()).unwrap();
+        let req = Request::post("/larifari").body(Empty::new()).unwrap();
         let resp = handler.call(req).await.unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -645,7 +657,7 @@ mod tests {
     async fn test_invalid_method() {
         let mut handler = get_handler();
 
-        let req = Request::get("/push").body(Body::empty()).unwrap();
+        let req = Request::get("/push").body(Empty::new().boxed()).unwrap();
         let resp = handler.call(req).await.unwrap();
 
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
@@ -658,7 +670,7 @@ mod tests {
 
         let req = Request::post("/push")
             .header(CONTENT_TYPE, "text/plain")
-            .body(Body::empty())
+            .body(Empty::new())
             .unwrap();
         let resp = handler.call(req).await.unwrap();
 
@@ -672,7 +684,7 @@ mod tests {
     async fn test_missing_contenttype() {
         let mut handler = get_handler();
 
-        let req = Request::post("/push").body(Body::empty()).unwrap();
+        let req = Request::post("/push").body(Empty::new()).unwrap();
         let resp = handler.call(req).await.unwrap();
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -687,7 +699,7 @@ mod tests {
 
         let req = Request::post("/push")
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(Body::empty())
+            .body(Empty::new())
             .unwrap();
         let resp = handler.call(req).await.unwrap();
 
@@ -703,7 +715,7 @@ mod tests {
 
         let req = Request::post("/push")
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body("token=1234".into())
+            .body(http_body_util::Full::new("token=1234".as_bytes()))
             .unwrap();
         let resp = handler.call(req).await.unwrap();
 

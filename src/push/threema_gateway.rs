@@ -12,7 +12,8 @@ use http::{
     header::{ACCEPT, CONTENT_TYPE},
     Request,
 };
-use hyper::{Body, StatusCode, Uri};
+use http_body_util::{BodyExt, Full};
+use hyper::{StatusCode, Uri};
 use serde_json as json;
 use x25519_dalek::StaticSecret;
 
@@ -114,7 +115,7 @@ pub async fn send_push(
             Request::post(uri)
                 .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .header(ACCEPT, "application/json")
-                .body(Body::from(body))
+                .body(Full::new(body.into()).boxed())
                 .unwrap(),
         )
         .await
