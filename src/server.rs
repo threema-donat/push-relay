@@ -12,7 +12,7 @@ use http::status::StatusCode;
 use http::Request;
 use http_body_util::{combinators::BoxBody, BodyExt};
 use http_body_util::{Empty, Full};
-use hyper::body::Incoming;
+use hyper::body::Body;
 use hyper::{
     body::Bytes, header::CONTENT_TYPE, server::conn::http1, service::Service, Method, Response,
 };
@@ -215,8 +215,8 @@ pub struct PushHandler {
 /// Main push handling entry point.
 ///
 /// Handle a request, return a response.
-async fn handle_push_request(
-    req: Request<BoxBody<Bytes, hyper::Error>>,
+async fn handle_push_request<B>(
+    req: Request<B>,
     fcm_client: HttpClient,
     fcm_api_key: String,
     apns_client_prod: Arc<Mutex<ApnsClient>>,
@@ -226,7 +226,12 @@ async fn handle_push_request(
     threema_gateway_config: Option<ThreemaGatewayConfig>,
     threema_gateway_private_key: Option<ThreemaGatewayPrivateKey>,
     influxdb: Option<Arc<Influxdb>>,
-) -> Result<Response<BoxBody<Bytes, Infallible>>, ServiceError> {
+) -> Result<Response<BoxBody<Bytes, Infallible>>, ServiceError>
+where
+    B: Body,
+    <B as Body>::Error: std::fmt::Display,
+    <B as Body>::Data: Send,
+{
     debug!("{} {}", req.method(), req.uri());
 
     // Verify path
@@ -536,7 +541,12 @@ async fn handle_push_request(
     }
 }
 
-impl Service<Request<Incoming>> for PushHandler {
+impl<B> Service<Request<B>> for PushHandler
+where
+    B: Body + Send + 'static,
+    <B as Body>::Error: std::fmt::Display,
+    <B as Body>::Data: Send,
+{
     type Response = Response<BoxBody<Bytes, Infallible>>;
     type Error = ServiceError;
     #[allow(clippy::type_complexity)]
@@ -544,8 +554,8 @@ impl Service<Request<Incoming>> for PushHandler {
         Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send + 'static>>;
 
     /// Main service entry point.
-    fn call(&self, req: Request<Incoming>) -> Self::Future {
-        let req = req.map(BodyExt::boxed);
+    fn call(&self, req: Request<B>) -> Self::Future {
+        // let req = req.map(BodyExt::boxed);
         // Delegate to async fn
         let fcm_client = self.fcm_client.clone();
         let fcm_api_key = self.fcm_api_key.clone();
@@ -599,6 +609,29 @@ mod tests {
 
     use super::*;
 
+    async fn pass_req_to_handler<B>(
+        handler: PushHandler,
+        req: Request<B>,
+    ) -> Result<Response<BoxBody<Bytes, Infallible>>, ServiceError>
+    where
+        B: Body + Send,
+        <B as Body>::Error: std::fmt::Display,
+    {
+        handle_push_request(
+            req,
+            handler.fcm_client,
+            handler.fcm_api_key,
+            handler.apns_client_prod,
+            handler.apns_client_sbox,
+            handler.hms_contexts,
+            handler.threema_gateway_client,
+            handler.threema_gateway_config,
+            handler.threema_gateway_private_key,
+            handler.influxdb,
+        )
+        .await
+    }
+
     async fn get_body<B>(body: B) -> String
     where
         B: hyper::body::Body,
@@ -646,8 +679,10 @@ mod tests {
     async fn test_invalid_path() {
         let mut handler = get_handler();
 
-        let req = Request::post("/larifari").body(Empty::new()).unwrap();
-        let resp = handler.call(req).await.unwrap();
+        let req = Request::post("/larifari")
+            .body(Empty::new().boxed())
+            .unwrap();
+        let resp = pass_req_to_handler(handler, req).await.unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
@@ -822,7 +857,9 @@ mod tests {
 
         let req = Request::post("/push")
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(format!("type=fcm&token={}&session={}&version=1", to, session).into())
+            .body(Full::new(
+                format!("type=fcm&token={}&session={}&version=1", to, session).into(),
+            ))
             .unwrap();
         let resp = handler.call(req).await.unwrap();
 
@@ -856,7 +893,9 @@ mod tests {
 
         let req = Request::post("/push")
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body("type=fcm&token=aassddff&session=deadbeef&version=1".into())
+            .body(Full::new(
+                "type=fcm&token=aassddff&session=deadbeef&version=1".into(),
+            ))
             .unwrap();
         let resp = handler.call(req).await.unwrap();
 
